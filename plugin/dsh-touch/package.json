@@ -1,0 +1,60 @@
+{
+  "name": "@local/dsh-touch",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "去鼠标化触屏适配：长按会话/工作区行呼出触屏操作面板（归档、置顶、改名、新建会话、删除工作区），并放大触屏命中区。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/plants13/dsh-touch.git",
+    "directory": "plugin/dsh-touch"
+  },
+  "homepage": "https://github.com/plants13/dsh-touch#readme",
+  "bugs": {
+    "url": "https://github.com/plants13/dsh-touch/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "touch",
+    "long-press",
+    "touchscreen",
+    "触屏"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "触屏适配",
+    "description": "长按会话或工作区行呼出触屏操作面板，并放大触屏命中区。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Internal reference material: DSH package sources and docs extracted from the
+# local DeepSeek Harness installation for API research. Third-party material,
+# not part of this project, never redistributed.
+ref/
+
+# Node / tooling noise
+node_modules/
+*.log
+npm-debug.log*
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
