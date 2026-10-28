@@ -41,7 +41,15 @@ class El {
     this.children = [];
     this.parentNode = null;
     this.textContent = '';
-    this.style = new Map();
+    this.style = {
+      _m: new Map(),
+      setProperty(name, value) {
+        this._m.set(name, value);
+      },
+      getPropertyValue(name) {
+        return this._m.get(name) || '';
+      },
+    };
     this._listeners = new Map();
     this._set = new Set(String(this.className).split(/\s+/).filter(Boolean));
     const self = this;
@@ -172,13 +180,24 @@ class El {
   removeEventListener() {}
 }
 
+/* Document listeners are recorded so the real `contextmenu` routing can be
+ * exercised, not just the helpers it calls. */
+const docListeners = new Map();
+
 const documentStub = {
   body: new El('body', '', {}),
   head: new El('head', '', {}),
   documentElement: new El('html', '', {}),
   activeElement: null,
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(type, fn) {
+    const list = docListeners.get(type) || [];
+    list.push(fn);
+    docListeners.set(type, list);
+  },
+  removeEventListener(type, fn) {
+    const list = docListeners.get(type) || [];
+    docListeners.set(type, list.filter((entry) => entry !== fn));
+  },
   createElement: (tag) => new El(tag, '', {}),
   querySelector: (sel) => documentStub.body.querySelector(sel),
   querySelectorAll: (sel) => {
@@ -318,8 +337,7 @@ function button(label) {
 
 /**
  * A real workspace group header: the "..." trigger wrapped in the Menu's own
- * relative root span (`.root`, position: relative; display: inline-flex), and a
- * "new session" button beside it.
+ * relative root span, plus the "new session" button.
  */
 function buildWorkspaceRow(name, expanded) {
   const row = new El('div', 'hIlkoa_projectRow', {
@@ -344,16 +362,15 @@ function buildWorkspaceRow(name, expanded) {
   actions.appendChild(plus);
   row.appendChild(actions);
 
+  row._title = title;
   row._trigger = trigger;
   row._plus = plus;
   return row;
 }
 
 /**
- * The ungrouped-sessions header. `actions` is undefined for a group without a
- * workspaceId, so the host renders no "..." at all — only the "+" button.
- * Clicking that button on long press would create a session, so it must never
- * be treated as a menu trigger.
+ * The ungrouped-sessions header: `actions` is undefined for a group without a
+ * workspaceId, so the host renders no "..." at all — only the "+".
  */
 function buildUngroupedRow() {
   const row = new El('div', 'hIlkoa_projectRow', {
@@ -371,6 +388,7 @@ function buildUngroupedRow() {
   const plus = button('在“未分组”中新建会话');
   actions.appendChild(plus);
   row.appendChild(actions);
+  row._title = title;
   row._plus = plus;
   return row;
 }
@@ -388,12 +406,16 @@ function buildSessionRow(id, titleText, archived) {
   time.textContent = '2 分钟前';
   row.appendChild(time);
   const actions = new El('span', 'hIlkoa_rowActions', {});
-  actions.appendChild(button('会话“' + titleText + '”的操作'));
+  const trigger = button('会话“' + titleText + '”的操作');
+  actions.appendChild(trigger);
   row.appendChild(actions);
+  row._title = title;
+  row._trigger = trigger;
   return row;
 }
 
-/* ---------- render helper ---------- */
+/* ---------- harness helpers ---------- */
+
 function render(element, depth = 0) {
   if (element === null || element === undefined || typeof element === 'boolean') return '';
   if (typeof element === 'string' || typeof element === 'number') return String(element);
@@ -409,92 +431,168 @@ function render(element, depth = 0) {
   return (element.children || []).map((c) => render(c, depth + 1)).join('');
 }
 
+const SHEET_MARKER = String.fromCharCode(0x2715); // the dialog's close glyph
+
 function layerComponent() {
   const found = registrations.find((r) => r.register === 'shell.overlay');
   return found ? found.component : null;
 }
 
-/** Install one row as the only row, then take the exact path the gesture takes. */
-function runRow(row) {
+function sheetText() {
+  const sheet = layerComponent();
+  return render(React.createElement(sheet, {}));
+}
+
+/** Install one row as the only row in the document. */
+function resetRow(row) {
   documentStub.body.children = [row];
   row.parentNode = documentStub.body;
   hookState = {};
-  const described = api.describe(0);
-  if (described === null) {
-    return { described: null, openResult: null, text: null, triggerClicked: false, plusClicked: false };
-  }
-  const openResult = api.open(0);
-  const sheet = layerComponent();
-  const text = render(React.createElement(sheet, {}));
   api.close();
-  return {
-    described,
-    openResult,
-    text,
-    triggerClicked: !!(row._trigger && row._trigger._clicked),
-    plusClicked: !!(row._plus && row._plus._clicked),
+}
+
+function ev(extra) {
+  const event = {
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {},
   };
+  return Object.assign(event, extra);
+}
+
+function dispatch(type, event) {
+  for (const fn of docListeners.get(type) || []) fn(event);
+}
+
+let pointerSeq = 100;
+function pressDown(row, pointerType, button) {
+  pointerSeq += 1;
+  dispatch(
+    'pointerdown',
+    ev({
+      target: row._title,
+      pointerType,
+      button,
+      buttons: button === 0 ? 1 : 2,
+      pointerId: pointerSeq,
+      clientX: 10,
+      clientY: 10,
+    }),
+  );
+}
+
+function contextMenu(row, button) {
+  const event = ev({ target: row._title, button });
+  dispatch('contextmenu', event);
+  return event;
 }
 
 /* ---------- assertions ---------- */
-const SESSION_SHAPE = ['归档', '置顶', '重命名', 'sheet.archive', 'sheet.pin'];
-const WORKSPACE_SHAPE = ['重命名工作区', '删除工作区', '新建会话', 'sheet.renameWorkspace', 'sheet.deleteWorkspace'];
 
 let failures = 0;
 function check(condition, message) {
-  console.log(`${condition ? 'ok  ' : 'FAIL'} ${message}`);
+  console.log(`   ${condition ? 'ok  ' : 'FAIL'} ${message}`);
   if (!condition) failures += 1;
 }
 
-console.log('=== workspace header: delegates to the host "..." menu ===');
-const workspaceRow = buildWorkspaceRow('my-project', true);
-const ws = runRow(workspaceRow);
-console.log('   describe:', JSON.stringify(ws.described));
-check(ws.described.isWorkspace === true, 'detected as a workspace');
-check((ws.described.title || '') === 'my-project', 'title read from projectText > title');
-check(ws.described.archived === false, 'not reported as archived (that is a Session state)');
-check(ws.described.expanded === true, 'expansion state read from aria-expanded');
-check(ws.described.hasMenuTrigger === true, '"..." trigger located');
-check(ws.openResult === 'opened native menu', 'long press opens the native menu');
-check(ws.triggerClicked === true, 'the "..." trigger was clicked');
-check(ws.plusClicked === false, 'the "new session" button was NOT clicked');
-// The overlay always renders its stylesheet; the close glyph only exists while
-// the dialog itself is mounted, so it is the reliable "is a sheet open" marker.
-check((ws.text || '').includes(String.fromCharCode(0x2715)) === false, 'no sheet dialog is rendered for a workspace');
-for (const bad of SESSION_SHAPE) {
-  check(!(ws.text || '').includes(bad), `no session action "${bad}" leaks in`);
-}
+console.log('=== workspace: long press -> our sheet ===');
+const wsLong = buildWorkspaceRow('my-project', true);
+resetRow(wsLong);
+pressDown(wsLong, 'touch', 0);
+flushTimers();
+const wsLongText = sheetText();
+console.log('   describe:', JSON.stringify(api.describe(0)));
+check(api.describe(0).isWorkspace === true, 'detected as a workspace');
+check(wsLongText.includes(SHEET_MARKER), 'our sheet is open');
+check(wsLongText.includes('重命名工作区'), 'offers "rename workspace"');
+check(wsLongText.includes('删除工作区'), 'offers "delete workspace"');
+check(wsLongText.includes('新建会话'), 'offers "new session"');
+check(wsLongText.includes('收起') || wsLongText.includes('展开'), 'offers expand/collapse');
+check(wsLong._trigger._clicked !== true, 'long press does NOT click the host "..."');
+check(wsLong._plus._clicked !== true, 'long press does NOT click "+"');
 
 console.log('');
-console.log('=== ungrouped header: no "..." exists, so nothing happens ===');
-const ungrouped = runRow(buildUngroupedRow());
-console.log('   describe:', JSON.stringify(ungrouped.described));
-check(ungrouped.described.isWorkspace === true, 'detected as a workspace');
-check(ungrouped.described.hasMenuTrigger === false, 'no "..." trigger on an ungrouped header');
-check(ungrouped.openResult === 'row had no target', 'long press does nothing');
-check(ungrouped.plusClicked === false, 'critical: the "+" button was NOT clicked (no accidental session)');
-check((ungrouped.text || '').includes(String.fromCharCode(0x2715)) === false, 'no sheet dialog is rendered');
+console.log('=== workspace: right click -> host "..." menu ===');
+const wsRight = buildWorkspaceRow('my-project', true);
+resetRow(wsRight);
+pressDown(wsRight, 'mouse', 2);
+const wsRightEvent = contextMenu(wsRight, 2);
+check(wsRightEvent.defaultPrevented === true, 'the platform menu is suppressed');
+check(wsRight._trigger._clicked === true, 'the host "..." trigger was clicked');
+check(!sheetText().includes(SHEET_MARKER), 'our sheet is NOT opened');
+check(wsRight._plus._clicked !== true, 'the "+" button was NOT clicked');
 
 console.log('');
-console.log('=== session row: keeps the custom sheet ===');
-const session = runRow(buildSessionRow('session-abc', '会话标题', false));
-console.log('   describe:', JSON.stringify(session.described));
-const sessionText = session.text || '';
-check(session.described.isWorkspace === false, 'detected as a session');
-check((session.described.title || '') === '会话标题', 'title read from the row title span');
-check(session.openResult === 'opened sheet', 'long press opens the sheet');
+console.log('=== workspace: the contextmenu a finger also emits stays ours ===');
+const wsTouchCtx = buildWorkspaceRow('my-project', true);
+resetRow(wsTouchCtx);
+pressDown(wsTouchCtx, 'touch', 0);
+const wsTouchEvent = contextMenu(wsTouchCtx, 0);
+check(wsTouchEvent.defaultPrevented === true, 'the platform menu is suppressed');
+check(wsTouchCtx._trigger._clicked !== true, 'touch contextmenu does NOT click the host "..."');
+check(sheetText().includes(SHEET_MARKER), 'our sheet handles the press instead');
+flushTimers();
+
+console.log('');
+console.log('=== ungrouped header: no "..." and no workspace to add to ===');
+const ungrouped = buildUngroupedRow();
+resetRow(ungrouped);
+pressDown(ungrouped, 'touch', 0);
+flushTimers();
+const ungroupedText = sheetText();
+console.log('   describe:', JSON.stringify(api.describe(0)));
+check(api.describe(0).hasMenuTrigger === false, 'no "..." trigger on an ungrouped header');
+check(ungroupedText.includes(SHEET_MARKER), 'our sheet still opens');
+check(ungroupedText.includes('收起') || ungroupedText.includes('展开'), 'offers expand/collapse');
+check(!ungroupedText.includes('重命名工作区'), 'does not offer "rename workspace"');
+check(!ungroupedText.includes('删除工作区'), 'does not offer "delete workspace"');
+check(!ungroupedText.includes('新建会话'), 'does not offer "new session"');
+check(ungrouped._plus._clicked !== true, 'the "+" button was NOT clicked');
+
+console.log('');
+console.log('=== ungrouped header: right click has no menu to open ===');
+const ungroupedRight = buildUngroupedRow();
+resetRow(ungroupedRight);
+pressDown(ungroupedRight, 'mouse', 2);
+const ungroupedEvent = contextMenu(ungroupedRight, 2);
+check(ungroupedEvent.defaultPrevented === false, 'leaves the platform menu alone');
+check(ungroupedRight._plus._clicked !== true, 'critical: the "+" button was NOT clicked');
+check(!sheetText().includes(SHEET_MARKER), 'no sheet is opened either');
+
+console.log('');
+console.log('=== session: long press -> our sheet ===');
+const sessionLong = buildSessionRow('session-abc', '会话标题', false);
+resetRow(sessionLong);
+pressDown(sessionLong, 'touch', 0);
+flushTimers();
+const sessionText = sheetText();
+check(api.describe(0).isWorkspace === false, 'detected as a session');
 check(sessionText.includes('归档'), 'offers "archive"');
 check(sessionText.includes('置顶'), 'offers "pin"');
 check(sessionText.includes('重命名'), 'offers "rename"');
-for (const bad of WORKSPACE_SHAPE) {
-  check(!sessionText.includes(bad), `does NOT offer workspace action "${bad}"`);
-}
+check(!sessionText.includes('重命名工作区'), 'does not offer workspace actions');
+check(sessionLong._trigger._clicked !== true, 'long press does NOT click the host "..."');
 
 console.log('');
-console.log('=== archived session flips its actions ===');
-const archived = runRow(buildSessionRow('session-def', '旧会话', true));
-const archivedText = archived.text || '';
-check(archived.described.archived === true, 'archived state detected');
+console.log('=== session: right click -> host "..." menu ===');
+const sessionRight = buildSessionRow('session-def', '另一个会话', false);
+resetRow(sessionRight);
+pressDown(sessionRight, 'mouse', 2);
+const sessionRightEvent = contextMenu(sessionRight, 2);
+check(sessionRightEvent.defaultPrevented === true, 'the platform menu is suppressed');
+check(sessionRight._trigger._clicked === true, 'the session "..." trigger was clicked');
+check(!sheetText().includes(SHEET_MARKER), 'our sheet is NOT opened');
+
+console.log('');
+console.log('=== archived session still flips its actions ===');
+const archived = buildSessionRow('session-ghi', '旧会话', true);
+resetRow(archived);
+pressDown(archived, 'touch', 0);
+flushTimers();
+const archivedText = sheetText();
+check(api.describe(0).archived === true, 'archived state detected');
 check(archivedText.includes('取消归档'), 'offers "unarchive"');
 check(!archivedText.includes('置顶'), 'does not offer "pin" while archived');
 

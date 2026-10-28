@@ -83,6 +83,11 @@
   out.manual_open = window.__dshTouch.open();
   if (window.__dshTouch) window.__dshTouch.close();
 
+  /* Right click is a separate path. Report the API only — invoking it would
+   * leave the host menu open and confuse the snapshot above. */
+  out.has_openMenu_api = typeof window.__dshTouch.openMenu === 'function';
+  out.hint_right_click = '调用 __dshTouch.openMenu(0) 可以模拟右键,验证宿主「...」菜单那条路';
+
   console.log('dsh-touch 诊断结果', out);
   return out;
 })();
