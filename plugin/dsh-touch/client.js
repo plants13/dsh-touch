@@ -23,13 +23,15 @@ window.__ModuleLoader__.load({
 		 * from the outside.
 		 */
 		var status = {
-			version: '1.1.0',
+			version: '1.2.0',
 			activated: false,
 			steps: 0,
 			errors: [],
 			presses: 0,
 			contextMenus: 0,
 			openings: 0,
+			menuOpenings: 0,
+			menuMisses: 0,
 			lastPointerType: '',
 			lastRowKey: '',
 		};
@@ -102,15 +104,7 @@ window.__ModuleLoader__.load({
 			'sheet.copied': 'Copied',
 			'sheet.archived': 'Archived',
 			'sheet.pinned': 'Pinned',
-			'sheet.workspace': 'Workspace',
 			'sheet.session': 'Session',
-			'sheet.expand': 'Expand',
-			'sheet.collapse': 'Collapse',
-			'sheet.newSession': 'New session here',
-			'sheet.renameWorkspace': 'Rename workspace',
-			'sheet.deleteWorkspace': 'Delete workspace',
-			'sheet.copyName': 'Copy name',
-			'sheet.noNewSession': 'No new-session button on this workspace',
 			'sheet.working': 'Working',
 			'sheet.failed': 'Action failed',
 			'sheet.unknownTitle': 'Untitled session',
@@ -142,15 +136,7 @@ window.__ModuleLoader__.load({
 			'sheet.copied': '已复制',
 			'sheet.archived': '已归档',
 			'sheet.pinned': '已置顶',
-			'sheet.workspace': '工作区',
 			'sheet.session': '会话',
-			'sheet.expand': '展开',
-			'sheet.collapse': '收起',
-			'sheet.newSession': '在此新建会话',
-			'sheet.renameWorkspace': '重命名工作区',
-			'sheet.deleteWorkspace': '删除工作区',
-			'sheet.copyName': '复制名称',
-			'sheet.noNewSession': '这个工作区没有新建会话按钮',
 			'sheet.working': '进行中',
 			'sheet.failed': '操作失败',
 			'sheet.unknownTitle': '未命名会话',
@@ -380,20 +366,48 @@ window.__ModuleLoader__.load({
 		var suppressedRow = null;
 
 		/**
-		 * Raise the action sheet for one row. Shared by the gesture and by the
-		 * manual `__dshTouch.open()` trigger so both take the identical path.
-		 * Returns false when the row cannot produce a target.
+		 * Route one pressed row.
+		 *
+		 * A Session opens this plugin's action sheet. A workspace opens the host's
+		 * own "..." menu instead: long press means exactly what clicking the dots
+		 * means, with the host keeping its dialogs, rules and feedback.
+		 *
+		 * Returns 'sheet', 'menu', or false when the row yields no target.
 		 */
 		function fire(row, config) {
 			if (row === null || row === undefined) return false;
 			if (!row.isConnected) return false;
 			var target = readTarget(row);
 			if (target === null) return false;
+			status.lastRowKey = (target.kind || '') + ':' + (target.id || '');
+			if (target.isWorkspace) return openWorkspaceMenu(row) ? 'menu' : false;
 			suppressedRow = target.element;
 			pulse(config);
 			status.openings += 1;
-			status.lastRowKey = (target.kind || '') + ':' + (target.id || '');
 			sheetStore.open(target);
+			return 'sheet';
+		}
+
+		/**
+		 * Click the workspace row's "..." like a person would.
+		 *
+		 * Order matters. The click is dispatched while `suppressedRow` is still
+		 * clear: this plugin's capture-phase click handler runs earlier in the event
+		 * path than React's, so an armed row would swallow the synthetic click and
+		 * no menu would appear. The row is armed immediately afterwards to swallow
+		 * the click the finger's release still delivers, which would otherwise also
+		 * toggle the group. The next pointerdown clears it again.
+		 */
+		function openWorkspaceMenu(row) {
+			var trigger = workspaceMenuTrigger(row);
+			if (trigger === null) {
+				status.menuMisses += 1;
+				return false;
+			}
+			suppressedRow = null;
+			trigger.click();
+			suppressedRow = row;
+			status.menuOpenings += 1;
 			return true;
 		}
 
@@ -821,7 +835,7 @@ window.__ModuleLoader__.load({
 					h(
 						'div',
 						{ className: ID_PREFIX + '-meta' },
-						h('span', null, t(current.isWorkspace ? 'sheet.workspace' : 'sheet.session')),
+						h('span', null, t('sheet.session')),
 						current.archived ? h('span', { className: ID_PREFIX + '-badge' }, t('sheet.archived')) : null,
 						!current.archived && current.pinned ? h('span', { className: ID_PREFIX + '-badge' }, t('sheet.pinned')) : null,
 					),
@@ -874,32 +888,6 @@ window.__ModuleLoader__.load({
 						),
 					),
 				);
-			} else if (current.isWorkspace) {
-				/* A workspace header is a container, not a Session: it has no
-				 * archive/pin state, and its rename and delete belong to the host's
-				 * own workspace menu (which also owns the confirmation dialogs and
-				 * the default-workspace rules). */
-				body = h(
-					'div',
-					{ className: ID_PREFIX + '-rows' },
-					h(Row, {
-						key: 'toggle',
-						label: t(current.expanded ? 'sheet.collapse' : 'sheet.expand'),
-						onClick: run(actions.open),
-					}),
-					h(Row, {
-						key: 'newSession',
-						label: t('sheet.newSession'),
-						onClick: run(actions.workspaceMenu('newSession'), { errorNotice: t('sheet.noNewSession') }),
-					}),
-					h(Row, { key: 'rename', label: t('sheet.renameWorkspace'), onClick: run(actions.workspaceMenu('rename')) }),
-					h(Row, {
-						key: 'delete',
-						label: t('sheet.deleteWorkspace'),
-						danger: true,
-						onClick: run(actions.workspaceMenu('delete')),
-					}),
-				);
 			} else {
 				var rows = [];
 				rows.push(h(Row, { key: 'open', label: t('sheet.open'), onClick: run(actions.open) }));
@@ -946,7 +934,7 @@ window.__ModuleLoader__.load({
 					h('div', { className: ID_PREFIX + '-sep', role: 'presentation' }),
 					h(Row, {
 						key: 'copy',
-						label: notice === t('sheet.copied') ? t('sheet.copied') : t(current.isWorkspace ? 'sheet.copyName' : 'sheet.copy'),
+						label: notice === t('sheet.copied') ? t('sheet.copied') : t('sheet.copy'),
 						onClick: run(actions.copy, { keepOpen: true, notice: t('sheet.copied') }),
 					}),
 				),
@@ -963,139 +951,58 @@ window.__ModuleLoader__.load({
 		};
 
 		/* ------------------------------------------------------------------ *
-		 * Driving the host's own row menu
+		 * Opening the host's own workspace menu
 		 *
-		 * A workspace's rename and delete are not exposed on any Client service
-		 * this plugin may inject — the `workspaces` service exists, but using the
-		 * host's own menu keeps the confirmation dialogs, the default-workspace
-		 * rules, and the toast feedback exactly as shipped, and needs no new
-		 * inject entry. So for workspace actions the sheet clicks the host's
-		 * menu: open the row's "..." trigger, then click the item whose label
-		 * matches.
+		 * A workspace header has no Session-style actions: everything it offers
+		 * (rename, delete) already lives in the host's own row menu, which also owns
+		 * the confirmation dialogs, the default-workspace rules and the toast
+		 * feedback. So the plugin delegates instead of reimplementing — a long press
+		 * becomes exactly the same thing as clicking the "..." beside the name.
 		 * ------------------------------------------------------------------ */
 
-		/** Label variants for a host menu item, Chinese first (this desktop is zh-CN). */
-		var MENU_LABELS = {
-			rename: ['重命名', '重命名工作区', 'Rename', 'Rename workspace'],
-			delete: ['删除工作区', 'Delete workspace'],
-			newSession: ['新会话', '新建会话', 'New session'],
-		};
-
-		function normalizeLabel(text) {
-			return String(text || '')
-				.replace(/\s+/g, ' ')
-				.replace(/…/g, '')
-				.trim()
-				.toLowerCase();
-		}
-
-		function menuItemNodes() {
-			try {
-				return Array.prototype.slice.call(document.querySelectorAll('[role="menuitem"]'));
-			} catch (error) {
-				return [];
-			}
-		}
-
-		/** The host menu row whose text matches one of `variants`. */
-		function findMenuItem(variants) {
-			var wanted = variants.map(normalizeLabel);
-			var items = menuItemNodes();
-			for (var item of items) {
-				var text = normalizeLabel(item.textContent);
-				for (var want of wanted) {
-					if (text === want || text.indexOf(want) !== -1) return item;
-				}
-			}
-			return null;
-		}
+		/** Localized labels of the workspace row's "new session" button. */
+		var NEW_SESSION_LABELS = ['新会话', '新建会话', 'New session'];
 
 		/**
-		 * Click one item in the pressed row's own menu.
+		 * The workspace row's "..." trigger, or null when the row has none.
 		 *
-		 * `waitForMenu` matters because the menu is rendered by React after the
-		 * trigger click, so the item does not exist on the same tick. A menu that
-		 * never appears resolves to `null` and the sheet reports it.
+		 * The actions cell holds that trigger and a "new session" button. An
+		 * ungrouped-sessions header has no menu at all — only the "+" button — and
+		 * clicking "+" here would create a session instead of opening a menu, so the
+		 * new-session button is excluded first and the menu's own relative wrapper
+		 * (`.root`, around the anchor) is used to confirm the choice.
 		 */
-		function clickRowMenuItem(row, variants, waitForMenu) {
+		function workspaceMenuTrigger(row) {
 			var cell = actionsCell(row);
-			if (cell === null) return Promise.resolve(null);
-			var trigger = cell.querySelector('button');
-			if (trigger === null) return Promise.resolve(null);
-			trigger.click();
-			if (waitForMenu !== true) {
-				var immediate = findMenuItem(variants);
-				if (immediate !== null) immediate.click();
-				return Promise.resolve(immediate);
-			}
-			return new Promise(function (resolve) {
-				var attempts = 0;
-				var step2 = function () {
-					var item = findMenuItem(variants);
-					if (item !== null) {
-						item.click();
-						resolve(item);
-						return;
-					}
-					attempts += 1;
-					if (attempts >= 24) {
-						resolve(null);
-						return;
-					}
-					setTimeout(step2, 25);
-				};
-				setTimeout(step2, 25);
-			});
-		}
-
-		/**
-		 * Click the workspace row's "new session" button.
-		 *
-		 * The actions cell holds the "..." menu trigger first and the new-session
-		 * button second (see the shipped `workspaceMenuItems` markup), so the
-		 * second button is the target. Its `aria-label` is the localized
-		 * `actions.newSession.aria`, matched as a fallback in case the order
-		 * ever changes.
-		 */
-		function clickRowActionButton(row) {
-			var cell = actionsCell(row);
-			if (cell === null) return Promise.resolve(false);
+			if (cell === null) return null;
 			var buttons = Array.prototype.slice.call(cell.querySelectorAll('button'));
-			if (buttons.length === 0) return Promise.resolve(false);
-			var target = buttons.length > 1 ? buttons[1] : null;
-			if (target === null) {
-				for (var button of buttons) {
-					var aria = button.getAttribute('aria-label') || '';
-					if (MENU_LABELS.newSession.some(function (label) { return aria.indexOf(label) !== -1; })) {
-						target = button;
+			var candidates = [];
+			for (var button of buttons) {
+				var aria = button.getAttribute('aria-label') || '';
+				var isNewSession = false;
+				for (var label of NEW_SESSION_LABELS) {
+					if (aria.indexOf(label) !== -1) {
+						isNewSession = true;
 						break;
 					}
 				}
+				if (isNewSession) continue;
+				candidates.push(button);
 			}
-			if (target === null) return Promise.resolve(false);
-			target.click();
-			return Promise.resolve(true);
-		}
-
-		function workspaceRowOf(target) {
-			var row = target === null ? null : target.element;
-			if (row === null || !row.isConnected) return null;
-			return row;
+			if (candidates.length === 0) return null;
+			for (var candidate of candidates) {
+				var parent = candidate.parentNode;
+				var parentClass = parent && typeof parent.className === 'string' ? parent.className : '';
+				if (/root/i.test(parentClass)) return candidate;
+			}
+			return candidates[0];
 		}
 
 		function sheetActions() {
 			return {
 				open: function () {
 					var target = sheetStore.getSnapshot().target;
-					if (target === null) return undefined;
-					if (target.isWorkspace) {
-						/* A workspace header has no "open"; expanding it in place is
-						 * the closest meaningful action, so reuse the row's own click. */
-						var row = workspaceRowOf(target);
-						if (row !== null) row.click();
-						return undefined;
-					}
-					if (services.uiWorkspace === null) return undefined;
+					if (target === null || services.uiWorkspace === null) return undefined;
 					services.uiWorkspace.openSession(target.id);
 					return undefined;
 				},
@@ -1129,25 +1036,6 @@ window.__ModuleLoader__.load({
 						if (target === null || services.sessions === null) return undefined;
 						return services.sessions.using(target.id, { source: 'workspaceOperation' }, function (reference) {
 							return reference.binding.session.rename(next);
-						});
-					};
-				},
-				/** Workspace rename/delete/new-session all ride the host's row menu. */
-				workspaceMenu: function (action) {
-					return function () {
-						var target = sheetStore.getSnapshot().target;
-						if (target === null) return undefined;
-						var row = workspaceRowOf(target);
-						if (row === null) return Promise.reject(new Error('workspace row is gone'));
-						if (action === 'newSession') {
-							return clickRowActionButton(row).then(function (clicked) {
-								if (!clicked) throw new Error('no "new session" button on this workspace row');
-								return undefined;
-							});
-						}
-						return clickRowMenuItem(row, MENU_LABELS[action] || [], true).then(function (item) {
-							if (item === null) throw new Error('menu item not found: ' + action);
-							return undefined;
 						});
 					};
 				},
@@ -1322,12 +1210,16 @@ window.__ModuleLoader__.load({
 							pinned: target.pinned,
 							expanded: target.expanded,
 							hasActionsCell: row === null ? false : actionsCell(row) !== null,
+							hasMenuTrigger: row === null ? false : workspaceMenuTrigger(row) !== null,
 						};
 					},
 					open: function (index) {
 						var row = this.rows()[index === undefined ? 0 : index] || null;
 						if (row === null) return 'no visible row found';
-						return fire(row, settings()) ? 'opened' : 'row had no target';
+						var result = fire(row, settings());
+						if (result === 'sheet') return 'opened sheet';
+						if (result === 'menu') return 'opened native menu';
+						return 'row had no target';
 					},
 					close: function () {
 						sheetStore.close();

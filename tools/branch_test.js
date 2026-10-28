@@ -306,7 +306,7 @@ if (!api) {
   process.exit(1);
 }
 
-/* ---------- build the two row shapes ---------- */
+/* ---------- build the row shapes ---------- */
 
 function button(label) {
   const b = new El('button', 'hIlkoa_iconButton', { 'aria-label': label });
@@ -316,8 +316,17 @@ function button(label) {
   return b;
 }
 
+/**
+ * A real workspace group header: the "..." trigger wrapped in the Menu's own
+ * relative root span (`.root`, position: relative; display: inline-flex), and a
+ * "new session" button beside it.
+ */
 function buildWorkspaceRow(name, expanded) {
-  const row = new El('div', 'hIlkoa_projectRow', { 'data-row-key': 'workspace:' + name, role: 'treeitem', 'aria-expanded': String(expanded) });
+  const row = new El('div', 'hIlkoa_projectRow', {
+    'data-row-key': 'workspace:' + name,
+    role: 'treeitem',
+    'aria-expanded': String(expanded),
+  });
   row.appendChild(new El('span', 'hIlkoa_slot hIlkoa_folder', {}));
   row.appendChild(new El('span', 'hIlkoa_slot hIlkoa_chevron', {}));
   const text = new El('span', 'hIlkoa_projectText', {});
@@ -325,17 +334,52 @@ function buildWorkspaceRow(name, expanded) {
   title.textContent = name;
   text.appendChild(title);
   row.appendChild(text);
+
   const actions = new El('span', 'hIlkoa_rowActions', {});
-  actions.appendChild(button('工作区“' + name + '”的操作'));
+  const menuRoot = new El('span', 'hIlkoa_root', {});
+  const trigger = button('工作区“' + name + '”的操作');
+  menuRoot.appendChild(trigger);
+  actions.appendChild(menuRoot);
   const plus = button('在“' + name + '”中新建会话');
-  plus.addEventListener('click', () => { plus._newSessionClicked = true; });
   actions.appendChild(plus);
   row.appendChild(actions);
+
+  row._trigger = trigger;
+  row._plus = plus;
+  return row;
+}
+
+/**
+ * The ungrouped-sessions header. `actions` is undefined for a group without a
+ * workspaceId, so the host renders no "..." at all — only the "+" button.
+ * Clicking that button on long press would create a session, so it must never
+ * be treated as a menu trigger.
+ */
+function buildUngroupedRow() {
+  const row = new El('div', 'hIlkoa_projectRow', {
+    'data-row-key': 'workspace:__ungrouped',
+    role: 'treeitem',
+    'aria-expanded': 'true',
+  });
+  row.appendChild(new El('span', 'hIlkoa_slot hIlkoa_folder', {}));
+  const text = new El('span', 'hIlkoa_projectText', {});
+  const title = new El('span', 'hIlkoa_title', {});
+  title.textContent = '未分组';
+  text.appendChild(title);
+  row.appendChild(text);
+  const actions = new El('span', 'hIlkoa_rowActions', {});
+  const plus = button('在“未分组”中新建会话');
+  actions.appendChild(plus);
+  row.appendChild(actions);
+  row._plus = plus;
   return row;
 }
 
 function buildSessionRow(id, titleText, archived) {
-  const row = new El('div', 'hIlkoa_sessionRow' + (archived ? ' hIlkoa_archived' : ''), { 'data-row-key': 'session:' + id, role: 'treeitem' });
+  const row = new El('div', 'hIlkoa_sessionRow' + (archived ? ' hIlkoa_archived' : ''), {
+    'data-row-key': 'session:' + id,
+    role: 'treeitem',
+  });
   row.appendChild(new El('span', 'hIlkoa_slot', {}));
   const title = new El('span', 'hIlkoa_title', {});
   title.textContent = titleText;
@@ -370,68 +414,85 @@ function layerComponent() {
   return found ? found.component : null;
 }
 
-function sheetTextFor(row, label) {
+/** Install one row as the only row, then take the exact path the gesture takes. */
+function runRow(row) {
   documentStub.body.children = [row];
   row.parentNode = documentStub.body;
   hookState = {};
-  if (label !== undefined) {
-    documentStub.body.children.push(label);
-    label.parentNode = documentStub.body;
-  }
   const described = api.describe(0);
   if (described === null) {
-    console.log(`   describe(0) -> null  (row key: ${row.getAttribute('data-row-key')})`);
-    return { described, text: null };
+    return { described: null, openResult: null, text: null, triggerClicked: false, plusClicked: false };
   }
-  api.open(0);
+  const openResult = api.open(0);
   const sheet = layerComponent();
   const text = render(React.createElement(sheet, {}));
   api.close();
-  return { described, text };
+  return {
+    described,
+    openResult,
+    text,
+    triggerClicked: !!(row._trigger && row._trigger._clicked),
+    plusClicked: !!(row._plus && row._plus._clicked),
+  };
 }
 
 /* ---------- assertions ---------- */
-const SESSION_ONLY = ['归档', '取消归档', '置顶', '取消置顶', 'sheet.archive', 'sheet.pin', 'sheet.unpin'];
-const WORKSPACE_ONLY = ['新建会话', '重命名工作区', '删除工作区', 'sheet.newSession', 'sheet.renameWorkspace', 'sheet.deleteWorkspace'];
+const SESSION_SHAPE = ['归档', '置顶', '重命名', 'sheet.archive', 'sheet.pin'];
+const WORKSPACE_SHAPE = ['重命名工作区', '删除工作区', '新建会话', 'sheet.renameWorkspace', 'sheet.deleteWorkspace'];
 
 let failures = 0;
 function check(condition, message) {
-  console.log(`   ${condition ? 'ok  ' : 'FAIL'} ${message}`);
+  console.log(`${condition ? 'ok  ' : 'FAIL'} ${message}`);
   if (!condition) failures += 1;
 }
 
-console.log('=== workspace header row ===');
-const workspaceResult = sheetTextFor(buildWorkspaceRow('default-workspace', true));
-console.log('   describe:', JSON.stringify(workspaceResult.described));
-const workspaceText = workspaceResult.text || '';
-check(workspaceResult.described.isWorkspace === true, 'detected as a workspace');
-check((workspaceResult.described.title || '') === 'default-workspace', 'title read from projectText > title');
-check(workspaceResult.described.archived === false, 'not reported as archived (that is a Session state)');
-check(workspaceResult.described.expanded === true, 'expansion state read from aria-expanded');
-check(workspaceText.includes('新建会话'), 'offers "new session"');
-check(workspaceText.includes('重命名工作区'), 'offers "rename workspace"');
-check(workspaceText.includes('删除工作区'), 'offers "delete workspace"');
-for (const bad of SESSION_ONLY) {
-  check(!workspaceText.includes(bad), `does NOT offer session action "${bad}"`);
+console.log('=== workspace header: delegates to the host "..." menu ===');
+const workspaceRow = buildWorkspaceRow('my-project', true);
+const ws = runRow(workspaceRow);
+console.log('   describe:', JSON.stringify(ws.described));
+check(ws.described.isWorkspace === true, 'detected as a workspace');
+check((ws.described.title || '') === 'my-project', 'title read from projectText > title');
+check(ws.described.archived === false, 'not reported as archived (that is a Session state)');
+check(ws.described.expanded === true, 'expansion state read from aria-expanded');
+check(ws.described.hasMenuTrigger === true, '"..." trigger located');
+check(ws.openResult === 'opened native menu', 'long press opens the native menu');
+check(ws.triggerClicked === true, 'the "..." trigger was clicked');
+check(ws.plusClicked === false, 'the "new session" button was NOT clicked');
+// The overlay always renders its stylesheet; the close glyph only exists while
+// the dialog itself is mounted, so it is the reliable "is a sheet open" marker.
+check((ws.text || '').includes(String.fromCharCode(0x2715)) === false, 'no sheet dialog is rendered for a workspace');
+for (const bad of SESSION_SHAPE) {
+  check(!(ws.text || '').includes(bad), `no session action "${bad}" leaks in`);
 }
 
 console.log('');
-console.log('=== session row ===');
-const sessionResult = sheetTextFor(buildSessionRow('session-abc', '会话标题', false));
-console.log('   describe:', JSON.stringify(sessionResult.described));
-const sessionText = sessionResult.text || '';
-check(sessionResult.described.isWorkspace === false, 'detected as a session');
-check((sessionResult.described.title || '') === '会话标题', 'title read from the row title span');
+console.log('=== ungrouped header: no "..." exists, so nothing happens ===');
+const ungrouped = runRow(buildUngroupedRow());
+console.log('   describe:', JSON.stringify(ungrouped.described));
+check(ungrouped.described.isWorkspace === true, 'detected as a workspace');
+check(ungrouped.described.hasMenuTrigger === false, 'no "..." trigger on an ungrouped header');
+check(ungrouped.openResult === 'row had no target', 'long press does nothing');
+check(ungrouped.plusClicked === false, 'critical: the "+" button was NOT clicked (no accidental session)');
+check((ungrouped.text || '').includes(String.fromCharCode(0x2715)) === false, 'no sheet dialog is rendered');
+
+console.log('');
+console.log('=== session row: keeps the custom sheet ===');
+const session = runRow(buildSessionRow('session-abc', '会话标题', false));
+console.log('   describe:', JSON.stringify(session.described));
+const sessionText = session.text || '';
+check(session.described.isWorkspace === false, 'detected as a session');
+check((session.described.title || '') === '会话标题', 'title read from the row title span');
+check(session.openResult === 'opened sheet', 'long press opens the sheet');
 check(sessionText.includes('归档'), 'offers "archive"');
 check(sessionText.includes('置顶'), 'offers "pin"');
 check(sessionText.includes('重命名'), 'offers "rename"');
-for (const bad of WORKSPACE_ONLY) {
+for (const bad of WORKSPACE_SHAPE) {
   check(!sessionText.includes(bad), `does NOT offer workspace action "${bad}"`);
 }
 
 console.log('');
 console.log('=== archived session flips its actions ===');
-const archived = sheetTextFor(buildSessionRow('session-def', '旧会话', true));
+const archived = runRow(buildSessionRow('session-def', '旧会话', true));
 const archivedText = archived.text || '';
 check(archived.described.archived === true, 'archived state detected');
 check(archivedText.includes('取消归档'), 'offers "unarchive"');
