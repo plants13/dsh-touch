@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 		 * from the outside.
 		 */
 		var status = {
-			version: '1.3.0',
+			version: '1.4.0',
 			activated: false,
 			steps: 0,
 			errors: [],
@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
 			openings: 0,
 			menuOpenings: 0,
 			menuMisses: 0,
+			hostActions: 0,
 			lastPointerType: '',
 			lastRowKey: '',
 		};
@@ -274,6 +275,8 @@ window.__ModuleLoader__.load({
 			close: function () {
 				if (state === EMPTY_STATE) return;
 				replaceState(EMPTY_STATE);
+				/* The host action occurrence only lives as long as the sheet. */
+				closeHostActions();
 			},
 			/**
 			 * Re-publish the snapshot so subscribers re-read localization. The
@@ -395,6 +398,8 @@ window.__ModuleLoader__.load({
 			pulse(config);
 			status.openings += 1;
 			status.lastRowKey = (target.kind || '') + ':' + (target.id || '');
+			/* Resolve before opening so the first paint already has the host rows. */
+			resolveHostActions(target);
 			sheetStore.open(target);
 			return true;
 		}
@@ -961,6 +966,36 @@ window.__ModuleLoader__.load({
 					);
 				}
 				rows.push(h(Row, { key: 'rename', label: t('sheet.rename'), onClick: startRename }));
+
+				/* Then whatever the host itself offers and this plugin does not:
+				 * fork, copy session ID, reveal, and anything a later release adds.
+				 * `separatorBefore` is honoured inside the group; the group itself
+				 * is always set off from the rows above. */
+				var hostRows = renderableHostActions();
+				if (hostRows.length > 0) {
+					rows.push(h('div', { key: 'host-separator', className: ID_PREFIX + '-sep', role: 'presentation' }));
+					for (var hostIndex = 0; hostIndex < hostRows.length; hostIndex += 1) {
+						var hostView = hostRows[hostIndex];
+						if (hostView.separatorBefore === true && hostIndex > 0) {
+							rows.push(
+								h('div', {
+									key: 'sep-' + hostView.id,
+									className: ID_PREFIX + '-sep',
+									role: 'presentation',
+								}),
+							);
+						}
+						rows.push(
+							h(Row, {
+								key: hostView.id,
+								label: hostActionLabel(hostView),
+								disabled: hostView.disabled === true,
+								onClick: run(hostActionRunner(hostView)),
+							}),
+						);
+					}
+				}
+
 				body = h('div', { className: ID_PREFIX + '-rows' }, rows);
 			}
 
@@ -1001,6 +1036,7 @@ window.__ModuleLoader__.load({
 		var services = {
 			uiWorkspace: null,
 			sessions: null,
+			ctx: null,
 		};
 
 		/* ------------------------------------------------------------------ *
@@ -1168,6 +1204,166 @@ window.__ModuleLoader__.load({
 			suppressedRow = row;
 			status.menuOpenings += 1;
 			return true;
+		}
+
+		/* ------------------------------------------------------------------ *
+		 * The host's own Session actions
+		 *
+		 * DSH 0.2.2 moved the Session context menu off a Slot onto
+		 * `contextMenus`. That service's `resolve(target)` hands another
+		 * renderer the very same action list the host menu shows, and
+		 * `select(id)` runs one of them. Using it is why an action the host adds
+		 * in a later release shows up in this sheet with no change here — 0.2.2's
+		 * "copy session ID" and "reveal in file manager" arrived exactly that way.
+		 *
+		 * Two rules keep the sheet honest:
+		 *   - Actions this plugin already renders itself are skipped, so nothing
+		 *     is listed twice.
+		 *   - Actions that own children are skipped: the sheet has no submenu,
+		 *     and `select()` refuses a parent action anyway.
+		 * ------------------------------------------------------------------ */
+
+		/** Providers whose actions this sheet renders itself. */
+		var OWN_SESSION_PROVIDERS = ['session.pin', 'session.rename', 'session.archive'];
+
+		var hostActionViews = [];
+		var menuOccurrence = null;
+		var menuUnsubscribe = null;
+
+		/**
+		 * The `contextMenus` service, or null where it does not exist.
+		 *
+		 * Looked up lazily through `ctx.get` rather than declared in `inject`:
+		 * declaring it would leave the plugin pending — a boot failure — on the
+		 * DSH releases that predate the service.
+		 */
+		function getContextMenus() {
+			try {
+				var ctx = services.ctx;
+				if (ctx === null || typeof ctx.get !== 'function') return null;
+				var menus = ctx.get('contextMenus');
+				return menus !== null && typeof menus.resolve === 'function' ? menus : null;
+			} catch (error) {
+				return null;
+			}
+		}
+
+		function readHostActions(occurrence) {
+			try {
+				var source = occurrence.source;
+				if (source === null || source === undefined || typeof source.getSnapshot !== 'function') return [];
+				var views = source.getSnapshot();
+				return Array.isArray(views) ? views : [];
+			} catch (error) {
+				return [];
+			}
+		}
+
+		function detachHostActions() {
+			if (menuUnsubscribe === null) return;
+			try {
+				menuUnsubscribe();
+			} catch (error) {
+				/* A store that already tore down is fine. */
+			}
+			menuUnsubscribe = null;
+		}
+
+		function closeHostActions() {
+			detachHostActions();
+			if (menuOccurrence !== null) {
+				try {
+					menuOccurrence.dispose();
+				} catch (error) {
+					/* Disposal must never break closing the sheet. */
+				}
+				menuOccurrence = null;
+			}
+			hostActionViews = [];
+			status.hostActions = 0;
+		}
+
+		/** Resolve the host's Session actions for one target, replacing any previous set. */
+		function resolveHostActions(target) {
+			closeHostActions();
+			if (target === null || target === undefined || target.isWorkspace) return;
+			var menus = getContextMenus();
+			if (menus === null) return;
+			try {
+				var occurrence = menus.resolve({
+					kind: 'session',
+					value: { sessionId: target.id, displayTitle: target.title },
+				});
+				menuOccurrence = occurrence;
+				hostActionViews = readHostActions(occurrence);
+				status.hostActions = hostActionViews.length;
+				var source = occurrence.source;
+				if (source !== null && source !== undefined && typeof source.subscribe === 'function') {
+					menuUnsubscribe = source.subscribe(function () {
+						hostActionViews = readHostActions(occurrence);
+						status.hostActions = hostActionViews.length;
+						sheetStore.refresh();
+					});
+				}
+			} catch (error) {
+				status.errors.push('host actions: ' + (error && error.message ? error.message : String(error)));
+				closeHostActions();
+			}
+		}
+
+		function ownHostAction(view) {
+			for (var provider of OWN_SESSION_PROVIDERS) {
+				if (view.id === provider || view.id.indexOf(provider + '/') === 0) return true;
+			}
+			return false;
+		}
+
+		/** The host actions this sheet should show, in the host's own order. */
+		function renderableHostActions() {
+			var out = [];
+			if (!Array.isArray(hostActionViews)) return out;
+			for (var view of hostActionViews) {
+				if (view === null || typeof view !== 'object') continue;
+				if (typeof view.id !== 'string') continue;
+				if (ownHostAction(view)) continue;
+				if (view.children !== undefined && view.children.length > 0) continue;
+				out.push(view);
+			}
+			return out;
+		}
+
+		function hostActionLabel(view) {
+			var label = view.label;
+			if (typeof label === 'function') {
+				try {
+					label = label();
+				} catch (error) {
+					label = '';
+				}
+			}
+			return label === undefined || label === null ? '' : String(label);
+		}
+
+		/** Run one host action, then drop the occurrence that owned it. */
+		function runHostAction(view) {
+			var occurrence = menuOccurrence;
+			if (occurrence === null || typeof occurrence.select !== 'function') return undefined;
+			detachHostActions();
+			menuOccurrence = null;
+			hostActionViews = [];
+			try {
+				occurrence.select(view.id);
+			} catch (error) {
+				status.errors.push('host action: ' + (error && error.message ? error.message : String(error)));
+			}
+			return undefined;
+		}
+
+		/** The operation one host-action row performs. */
+		function hostActionRunner(view) {
+			return function () {
+				return runHostAction(view);
+			};
 		}
 
 		function sheetActions() {
@@ -1362,6 +1558,9 @@ window.__ModuleLoader__.load({
 			step('services', function () {
 				services.uiWorkspace = ctx.uiWorkspace || null;
 				services.sessions = ctx.sessions || null;
+				/* Kept only so `ctx.get('contextMenus')` can be called lazily; see
+				 * getContextMenus for why the service is not declared in `inject`. */
+				services.ctx = ctx;
 			});
 
 			step('locale subscription', function () {
@@ -1414,7 +1613,14 @@ window.__ModuleLoader__.load({
 							expanded: target.expanded,
 							hasActionsCell: row === null ? false : actionsCell(row) !== null,
 							hasMenuTrigger: row === null ? false : rowMenuTrigger(row) !== null,
+							contextMenus: getContextMenus() !== null,
 						};
+					},
+					/** What the host offers for the sheet that is currently open. */
+					hostActions: function () {
+						return renderableHostActions().map(function (view) {
+							return { id: view.id, label: hostActionLabel(view), disabled: view.disabled === true };
+						});
 					},
 					open: function (index) {
 						var row = this.rows()[index === undefined ? 0 : index] || null;

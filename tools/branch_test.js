@@ -301,6 +301,38 @@ const slots = {
     return () => {};
   },
 };
+/* The host's own Session action list (DSH 0.2.2 `contextMenus`). The fake
+ * mirrors what resolve() publishes: presentation only, plus the ids this
+ * plugin must skip because it renders those actions itself. */
+const hostMenu = {
+  resolved: [],
+  selected: [],
+  resolve(target) {
+    hostMenu.resolved.push(target);
+    return {
+      source: {
+        getSnapshot: () => hostMenu.views,
+        subscribe: () => () => {},
+      },
+      ready: Promise.resolve(),
+      dispose() {},
+      select(id) {
+        hostMenu.selected.push(id);
+      },
+    };
+  },
+};
+hostMenu.views = [
+  { id: 'session.fork/fork', label: '分叉会话' },
+  { id: 'session.id/copy', label: '复制会话 ID', separatorBefore: true },
+  { id: 'open-in-app.reveal/reveal', label: '在文件资源管理器中显示' },
+  { id: 'x.disabled/pause', label: '暂停会话', disabled: true },
+  { id: 'x.submenu/parent', label: '带子菜单的动作', children: [{ id: 'x.submenu/parent/a', label: '子项' }] },
+  /* Already rendered by this plugin — must not be listed twice. */
+  { id: 'session.pin/pin', label: '置顶会话' },
+  { id: 'session.archive/archive', label: '归档' },
+];
+
 const ctx = new Proxy(
   {
     locale,
@@ -308,6 +340,9 @@ const ctx = new Proxy(
     uiWorkspace: { openSession() {}, archiveSession: async () => {}, unarchiveSession: async () => {}, pinSession: async () => {}, unpinSession: async () => {} },
     sessions: { using: async (t, o, op) => op({ binding: { session: { rename: async () => {} } } }) },
     effect(cb) { return cb() || (() => {}); },
+    get(name) {
+      return name === 'contextMenus' ? hostMenu : undefined;
+    },
   },
   {
     get(bag, prop, receiver) {
@@ -441,6 +476,63 @@ function layerComponent() {
 function sheetText() {
   const sheet = layerComponent();
   return render(React.createElement(sheet, {}));
+}
+
+/** Expand function/class components into plain elements, keeping children. */
+function expandTree(element) {
+  if (element === null || element === undefined || typeof element === 'boolean') return null;
+  if (typeof element === 'string' || typeof element === 'number') return element;
+  if (Array.isArray(element)) return element.map(expandTree);
+  if (typeof element !== 'object') return null;
+  const { type, props } = element;
+  if (typeof type === 'symbol') return (element.children || []).map(expandTree);
+  if (typeof type === 'function') {
+    const isClass = type.prototype && typeof type.prototype.render === 'function';
+    if (isClass) return expandTree(new type(props).render());
+    return expandTree(type(Object.assign({}, props, { children: element.children })));
+  }
+  /* A host element: keep it, but expand its children too, or the rows inside a
+   * plain <div> would never be reached. */
+  return Object.assign({}, element, { children: (element.children || []).map(expandTree) });
+}
+
+/** The rendered element tree, for finding a row to click. */
+function sheetTree() {
+  const sheet = layerComponent();
+  return expandTree(React.createElement(sheet, {}));
+}
+
+function textOf(node) {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (typeof node !== 'object') return '';
+  return (node.children || []).map(textOf).join('');
+}
+
+/** The row button whose text contains `label`, or null. */
+function findRowButton(tree, label) {
+  let found = null;
+  const visit = (node) => {
+    if (!node || typeof node !== 'object' || found) return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const cls = node.props && node.props.className;
+    const isRow = typeof cls === 'string' && cls.split(/\s+/).indexOf('dsht-row') !== -1;
+    if (isRow && textOf(node).indexOf(label) !== -1) {
+      found = node;
+      return;
+    }
+    (node.children || []).forEach(visit);
+  };
+  visit(tree);
+  return found;
+}
+
+function countOccurrences(text, needle) {
+  return text.split(needle).length - 1;
 }
 
 /** Install one row as the only row in the document. */
@@ -595,6 +687,44 @@ const archivedText = sheetText();
 check(api.describe(0).archived === true, 'archived state detected');
 check(archivedText.includes('取消归档'), 'offers "unarchive"');
 check(!archivedText.includes('置顶'), 'does not offer "pin" while archived');
+
+console.log('');
+console.log('=== session: the host\'s own actions join the sheet ===');
+hostMenu.resolved = [];
+hostMenu.selected = [];
+const hostTarget = buildSessionRow('session-host', '宿主动作会话', false);
+resetRow(hostTarget);
+pressDown(hostTarget, 'touch', 0);
+flushTimers();
+const hostText = sheetText();
+const hostTree = sheetTree();
+check(api.describe(0).contextMenus === true, 'the contextMenus service was found');
+check(hostMenu.resolved.length === 1, 'resolve() ran once for the opened session');
+check(hostMenu.resolved[0] && hostMenu.resolved[0].kind === 'session', 'resolved the session target family');
+check(hostMenu.resolved[0].value.sessionId === 'session-host', 'passed the row session id');
+check(hostText.includes('复制会话 ID'), 'shows the new "copy session ID" action');
+check(hostText.includes('在文件资源管理器中显示'), 'shows the new "reveal in file manager" action');
+check(hostText.includes('分叉会话'), 'shows "fork"');
+check(hostText.includes('暂停会话'), 'shows a host action that is disabled');
+check(!hostText.includes('带子菜单的动作'), 'skips an action that owns a submenu');
+check(countOccurrences(hostText, '置顶') === 1, 'does not duplicate the pin action');
+check(countOccurrences(hostText, '归档') === 1, 'does not duplicate the archive action');
+
+const listed = api.hostActions();
+check(listed.length === 4, `diagnostics list ${listed.length} renderable host actions (expected 4)`);
+const pausedRow = findRowButton(hostTree, '暂停会话');
+check(pausedRow !== null && pausedRow.props.disabled === true, 'the disabled host action renders disabled');
+
+const copyRow = findRowButton(hostTree, '复制会话 ID');
+check(copyRow !== null, 'the copy-session-id row is clickable');
+if (copyRow !== null) copyRow.props.onClick();
+check(
+  hostMenu.selected.length === 1 && hostMenu.selected[0] === 'session.id/copy',
+  'clicking the row runs the host action by its published id',
+);
+
+const afterRun = api.hostActions();
+check(afterRun.length === 0, 'the occurrence is released once the action ran');
 
 console.log('');
 if (failures > 0) {
